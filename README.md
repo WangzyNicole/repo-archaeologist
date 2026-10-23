@@ -30,11 +30,12 @@ It returns a narrative answer with the supporting timeline underneath, as a term
 
 The failure mode for a tool like this is a fluent answer citing a PR number that doesn't exist. So citations aren't taken on trust:
 
-- Every tool records the canonical URL of everything it surfaces into an **evidence ledger**.
-- The agent is instructed to cite only URLs that appeared verbatim in tool output.
-- After it submits, **every link in the answer is checked against the ledger.** Anything it never actually retrieved is flagged red in the report and listed in a banner at the top.
+- Every tool records the canonical URL of everything it surfaces into an **evidence ledger**, along with every commit sha and `#number` its output showed the model. A failed lookup records nothing, so asking for issue #999 doesn't make #999 citable.
+- The agent is instructed to cite only URLs, shas and issue numbers that appeared verbatim in tool output.
+- After it submits, **every citation in the answer is checked against the ledger**: markdown links, and bare references like `#412` or `a1b2c3d` in the prose and timeline. Anything it never actually retrieved is flagged red in the report and listed in a banner at the top.
+- **The answer as a whole gets a verdict.** `supported` means everything it cites was retrieved. `partial` means some of it wasn't. `unsupported` means none of it was, *or it cites nothing at all*, so a fluent answer with no sources can't pass as verified. Unsupported answers get their own banner, and `archaeo ask --strict` exits with status 2 on anything short of `supported`.
 
-A run with an unverified citation tells you something is wrong. A run with none means every link in the narrative came back from a real lookup. The report also ships the full evidence trail — all tool calls, arguments and raw output — so any claim can be traced to the lookup that produced it.
+A run with an unverified citation tells you something is wrong. A `supported` run means every link and reference in the narrative came back from a real lookup. The report also ships the full evidence trail — all tool calls, arguments and raw output — so any claim can be traced to the lookup that produced it. Local repos with no GitHub remote have no URLs to cite, so their answers are checked on the shas alone.
 
 ## Install
 
@@ -60,6 +61,12 @@ archaeo ask django/django "why does the ORM defer this query?" --open
 
 # watch it think
 archaeo ask pallets/flask "why is the app context a stack?" -v
+
+# dependency pins: it pickaxe-searches the constraint string to find the commit that added it
+archaeo ask ./my-service "why is protobuf pinned below 4?" --focus requirements.txt
+
+# fail (exit 2) unless every citation was verified, e.g. in a script
+archaeo ask psf/requests "why is urllib3 capped?" --strict
 ```
 
 Works on local clones too — pass a path instead of a slug. Without a GitHub remote it runs on git history alone and says so.
@@ -111,7 +118,7 @@ python smoke_test.py            # all tools against a real clone of pallets/clic
 python agent_loop_test.py       # the loop, driven by a scripted fake model
 ```
 
-`smoke_test.py` clones a real repo and exercises every tool against real history, plus path-traversal refusal, ledger verification, markdown escaping and report generation. `agent_loop_test.py` drives the loop with a fake client to cover the parts that are expensive to debug live: tool results being fed back correctly, turn exhaustion forcing a final answer, a stalled model not looping forever, tool errors surviving, and a fabricated citation being caught while a genuine one passes.
+`smoke_test.py` clones a real repo and exercises every git and code tool against real history, plus path-traversal refusal, ledger verification (links and bare refs), markdown escaping and report generation. It also runs the GitHub tools against a stubbed HTTP session, so the disk cache, cache expiry, token header and rate-limit message are checked with no network calls and no token. `agent_loop_test.py` drives the loop with a fake client to cover the parts that are expensive to debug live: tool results being fed back correctly, turn exhaustion forcing a final answer, a stalled model not looping forever, tool errors surviving, a fabricated citation being caught while a genuine one passes, bare shas verifying on a local repo with no remote, and an answer that cites nothing being flagged unsupported.
 
 ## Limits
 

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from archaeo.evidence import EvidenceLedger  # noqa: E402
 from archaeo.markdown_lite import to_html  # noqa: E402
 from archaeo.models import Findings, Investigation, ToolCall  # noqa: E402
-from archaeo.repo import resolve_repo  # noqa: E402
+from archaeo.repo import Repo, resolve_repo  # noqa: E402
 from archaeo.tools import Toolbox  # noqa: E402
 from archaeo.ui import standalone_html  # noqa: E402
 
@@ -32,6 +32,75 @@ def check(label: str, condition: bool, detail: str = "") -> None:
     print(f"  [{PASS if condition else FAIL}] {label}" + (f"  — {detail}" if detail and not condition else ""))
     if not condition:
         failures += 1
+
+
+class FakeResponse:
+    def __init__(self, status: int, data, headers: dict | None = None) -> None:
+        self.status_code, self._data, self.headers, self.text = status, data, headers or {}, ""
+
+    def json(self):
+        return self._data
+
+
+class FakeSession:
+    """Stands in for requests.Session: replays canned responses, counts calls."""
+
+    def __init__(self, *responses: FakeResponse) -> None:
+        self.responses, self.calls, self.headers = list(responses), 0, {}
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        if not self.responses:
+            raise AssertionError(f"unexpected network call: {url}")
+        return self.responses.pop(0)
+
+
+def github_checks(real_repo: Repo) -> None:
+    import json
+    import time
+
+    from archaeo.config import CONFIG
+    from archaeo.tools import github_tools as gh
+
+    saved_cache = CONFIG.cache_dir
+    CONFIG.cache_dir = Path(tempfile.mkdtemp(prefix="archaeo-http-"))
+    try:
+        repo = Repo(path=real_repo.path, owner="o", name="r")
+        client = gh.GitHubClient(repo, token="test-token")
+        check("token is sent as a bearer header", client.session.headers.get("Authorization") == "Bearer test-token")
+
+        pr = {"number": 7, "title": "Pin the parser", "html_url": "https://github.com/o/r/pull/7",
+              "body": "Fixes #3 by capping the parser below 2.0.", "user": {"login": "a"}, "merged_at": "2020-01-02T00:00:00Z"}
+        client.session = FakeSession(FakeResponse(200, pr), FakeResponse(200, []), FakeResponse(200, []))
+        ledger = EvidenceLedger()
+        text = gh.github_pull_request(repo, ledger, number=7, client=client)
+        check("github_pull_request renders the PR", "PR #7: Pin the parser" in text, text[:200])
+        check("linked issues are surfaced", "issues referenced in the description: #3" in text)
+        check("the PR url and number are recorded", ledger.is_supported(pr["html_url"]) and ledger.ref_supported("#7"))
+
+        calls = client.session.calls
+        again = gh.github_pull_request(repo, EvidenceLedger(), number=7, client=client)
+        check("a repeat lookup is served from disk", client.session.calls == calls and again == text)
+
+        fresh = gh.GitHubClient(repo, token="test-token")
+        fresh.session = FakeSession()
+        check("the disk cache survives a new client", fresh.get("/repos/o/r/pulls/7")["number"] == 7)
+
+        for cached in CONFIG.http_cache.glob("*.json"):
+            payload = json.loads(cached.read_text())
+            payload["_fetched_at"] = time.time() - gh.CACHE_TTL_SECONDS - 1
+            cached.write_text(json.dumps(payload))
+        fresh.session = FakeSession(FakeResponse(200, {**pr, "title": "Pin the parser (edited)"}))
+        check("an expired entry is refetched", fresh.get("/repos/o/r/pulls/7")["title"].endswith("(edited)"))
+
+        anonymous = gh.GitHubClient(repo, token="test-token")
+        anonymous.token = None
+        anonymous.session = FakeSession(FakeResponse(403, {}, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1700000000"}))
+        limited = gh.github_issue(repo, EvidenceLedger(), number=99, client=anonymous)
+        check("rate limit exhaustion is an error string", limited.startswith("ERROR:") and "rate limit" in limited, limited)
+        check("without a token it says how to raise the limit", "GITHUB_TOKEN" in limited and "5000" in limited, limited)
+    finally:
+        CONFIG.cache_dir = saved_cache
 
 
 def main(target: str) -> int:
@@ -126,6 +195,20 @@ def main(target: str) -> int:
     check("an invented url does not verify", not ledger.is_supported(fake))
     missing = ledger.unsupported(f"See [#999999]({fake}) for details.")
     check("unsupported() catches the invented citation", missing == [fake], str(missing))
+    if sha:
+        check("tool output shas are recorded", any(known.startswith(sha[:10]) for known in ledger.shas))
+        bare = ledger.check(f"Blame lands on `{sha[:7]}`.")
+        check("a bare sha from tool output verifies", bare.verdict == "supported", str(bare))
+    invented = ledger.check("It came from `abc1234def` and #9999999.")
+    check("bare refs never retrieved are flagged", invented.unverified_refs == ["#9999999", "abc1234def"], str(invented))
+    check("citing only unretrieved refs is unsupported", invented.verdict == "unsupported")
+    uncited = ledger.check("It is probably for performance.")
+    check("an answer citing nothing is unsupported", uncited.verdict == "unsupported" and not uncited.unverified_refs)
+    prose = ledger.check("The defaced 2024 build, &#123; entities and line 1234567 are not citations.")
+    check("words, entities and plain numbers are not read as refs", prose.unverified_refs == [], str(prose))
+
+    print("\nGitHub tools and disk cache (stubbed, no network)")
+    github_checks(repo)
 
     print("\nRendering")
     html = to_html(
@@ -156,9 +239,14 @@ def main(target: str) -> int:
     )
     check("timeline is sorted oldest first", investigation.findings.timeline[0].date == "2019-01-01")
     investigation.findings.unverified_urls = ["https://github.com/o/r/pull/1"]
+    investigation.findings.unverified_refs = ["#0"]
+    investigation.findings.support = "unsupported"
     page = standalone_html(investigation)
     check("report is a full html document", page.startswith("<!doctype html>") and "</html>" in page)
     check("report surfaces the unverified banner", "Unverified citations" in page)
+    check("report lists unverified bare refs", "<li>#0</li>" in page)
+    check("report flags an unsupported answer", "Unsupported answer" in page and "unsupported answer" in page)
+    check("unsupported report never claims verification", "citations verified" not in page)
     check("report includes the evidence trail", "git_blame" in page and "tool calls" in page)
     check("report round-trips to json", '"confidence": "high"' in investigation.to_json())
 

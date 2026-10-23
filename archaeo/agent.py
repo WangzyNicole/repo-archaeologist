@@ -66,12 +66,23 @@ WHAT EXPERIENCED ARCHAEOLOGISTS KNOW
 - Watch for external causes. Workarounds are often tied to a specific version of
   a dependency, a platform bug, or a since-fixed upstream issue. Dates and
   release tags help you tell whether the constraint still holds.
+- A dependency pin is a scar with a version number. For "why is X pinned,
+  capped or excluded?", find the line in the manifest (requirements*.txt,
+  pyproject.toml, setup.py/cfg, package.json, go.mod, Cargo.toml, Gemfile...)
+  and pickaxe-search the exact constraint string (e.g. '<2.0' or '!=1.4.1') to
+  find the commit that introduced it — blame alone often lands on a later bump.
+  Lockfile churn and bot upgrades (dependabot, renovate) are the reformatting of
+  dependency history: step past them. The reason is usually an upstream breakage,
+  so look for the upstream issue or changelog linked from the PR, and check
+  whether a later release lifted the constraint.
 
 EVIDENCE DISCIPLINE
 
 - Cite only URLs that appeared verbatim in a tool result. Never construct a URL
-  from a number you inferred. Uncited claims and invented links are checked
-  after you submit, and unsupported links are flagged in the output.
+  from a number you inferred. Bare references are held to the same rule: write
+  a sha or a #number only if a tool showed it to you. Every citation is checked
+  after you submit; unretrieved ones are flagged, and an answer that cites no
+  retrieved evidence at all is flagged as unsupported.
 - Separate record from inference in your wording. "The PR states..." for what is
   written; "this suggests..." for what you concluded. Never blur the two.
 - If the record does not answer the question, say so and report what you ruled
@@ -302,11 +313,19 @@ def run_investigation(
         findings = _force_submit(caller.client, toolbox, messages, investigation, emit)
 
     if findings is not None:
-        findings.unverified_urls = ledger.unsupported(
-            findings.answer, *[event.url for event in findings.timeline]
+        check = ledger.check(
+            findings.answer,
+            *[event.url for event in findings.timeline],
+            *[event.ref for event in findings.timeline],
         )
-        if findings.unverified_urls:
-            emit({"type": "status", "message": f"{len(findings.unverified_urls)} citation(s) could not be verified against retrieved evidence."})
+        findings.verified_citations = check.verified
+        findings.unverified_urls = check.unverified_urls
+        findings.unverified_refs = check.unverified_refs
+        findings.support = check.verdict
+        if check.verdict == "unsupported":
+            emit({"type": "status", "message": "Unsupported answer: it cites nothing that was retrieved during the investigation."})
+        elif findings.unverified:
+            emit({"type": "status", "message": f"{len(findings.unverified)} citation(s) could not be verified against retrieved evidence."})
         investigation.findings = findings
 
     investigation.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")

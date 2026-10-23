@@ -91,6 +91,7 @@ PAGE = """<!doctype html>
       Try:
       <button type="button" class="sample" data-repo="pallets/click" data-q="why does Click use a Context object instead of passing parameters directly?"></button>
       <button type="button" class="sample" data-repo="psf/requests" data-q="why does requests not support async?"></button>
+      <button type="button" class="sample" data-repo="pallets/flask" data-q="why is the Werkzeug dependency pinned to a minimum version?"></button>
       <button type="button" class="sample" data-repo="python/cpython" data-q="why is the GIL still there?"></button>
     </div>
   </form>

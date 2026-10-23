@@ -115,11 +115,15 @@ def _print_findings(investigation: Investigation) -> None:
 
     badge = {"high": GREEN, "medium": AMBER, "low": RED}.get(findings.confidence, GREY)
     summary = f"  confidence: {c(findings.confidence, badge)}   evidence lookups: {len(investigation.trace)}"
-    if findings.unverified_urls:
-        summary += c(f"   unverified citations: {len(findings.unverified_urls)}", RED)
+    if findings.support == "unsupported":
+        summary += c("   UNSUPPORTED: cites no retrieved evidence", RED)
+    elif findings.unverified:
+        summary += c(f"   unverified citations: {len(findings.unverified)}", RED)
     else:
-        summary += c("   all citations verified", GREEN)
+        summary += c(f"   all citations verified ({len(findings.verified_citations)})", GREEN)
     print(summary)
+    for item in findings.unverified:
+        print(c(f"    ? {item}  (never returned by a tool)", RED))
 
 
 def cmd_ask(args: argparse.Namespace) -> int:
@@ -169,6 +173,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
     if args.open:
         webbrowser.open(out_path.resolve().as_uri())
     print()
+    if args.strict and investigation.findings and investigation.findings.support != "supported":
+        return 2
     return 0
 
 
@@ -204,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"How hard the model thinks on newer models (default {CONFIG.effort})",
     )
     ask.add_argument("--no-thinking", action="store_true", help="Disable thinking entirely")
+    ask.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with status 2 unless every citation in the answer was verified against retrieved evidence",
+    )
     ask.set_defaults(func=cmd_ask)
 
     serve = sub.add_parser("serve", help="Run the web UI")

@@ -254,12 +254,9 @@ class Toolbox:
 
         if len(result) > CONFIG.max_tool_result_chars:
             result = result[: CONFIG.max_tool_result_chars] + "\n...[tool output truncated; narrow your query]"
-        # Anything the tool surfaced is now fair game to cite.
-        self.ledger.record_many([url for url in _urls_in(result)])
-        return result, result.startswith("ERROR:"), int((time.monotonic() - started) * 1000)
-
-
-def _urls_in(text: str) -> list[str]:
-    from ..evidence import extract_urls
-
-    return extract_urls(text)
+        is_error = result.startswith("ERROR:")
+        # Anything the tool surfaced is now fair game to cite. An error only
+        # echoes back what the model asked for, so it proves nothing exists.
+        if not is_error:
+            self.ledger.record_text(result)
+        return result, is_error, int((time.monotonic() - started) * 1000)

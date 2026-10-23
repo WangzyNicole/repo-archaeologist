@@ -127,18 +127,18 @@ def render_findings(investigation: Investigation) -> str:
 
     parts: list[str] = []
 
-    verified_count = sum(1 for e in findings.timeline if e.url) - len(
-        [e for e in findings.timeline if e.url and not verifier(e.url)]
-    )
+    flagged = sorted(unverified) + list(findings.unverified_refs)
     meta = [
         f'<span class="chip {findings.confidence}">confidence: {findings.confidence}</span>',
         f'<span class="chip">{len(investigation.trace)} evidence lookups</span>',
         f'<span class="chip">{len(findings.timeline)} timeline events</span>',
     ]
-    if unverified:
-        meta.append(f'<span class="chip warn">{len(unverified)} unverified citation(s)</span>')
-    else:
-        meta.append('<span class="chip">all citations verified</span>')
+    if findings.support == "unsupported":
+        meta.append('<span class="chip warn">unsupported answer</span>')
+    if flagged:
+        meta.append(f'<span class="chip warn">{len(flagged)} unverified citation(s)</span>')
+    elif findings.support == "supported":
+        meta.append(f'<span class="chip">all citations verified ({len(findings.verified_citations)})</span>')
 
     parts.append(
         f"""<header class="masthead">
@@ -148,12 +148,22 @@ def render_findings(investigation: Investigation) -> str:
 </header>"""
     )
 
-    if unverified:
-        items = "".join(f"<li>{_esc(url)}</li>" for url in sorted(unverified))
+    if findings.support == "unsupported":
+        why = (
+            "Every source it cites is unverified, so"
+            if flagged
+            else "It cites no commit, pull request, issue or link at all, so"
+        )
         parts.append(
-            f'<div class="banner"><strong>Unverified citations.</strong> These links appear in the answer but were '
-            f"never returned by a tool during this investigation, so they are not backed by retrieved evidence:"
-            f"<ul>{items}</ul></div>"
+            f'<div class="banner"><strong>Unsupported answer.</strong> Nothing in this answer is backed by evidence '
+            f"retrieved during the investigation. {why} treat it as unsourced until checked by hand.</div>"
+        )
+    if flagged:
+        items = "".join(f"<li>{_esc(item)}</li>" for item in flagged)
+        parts.append(
+            f'<div class="banner"><strong>Unverified citations.</strong> These links and references appear in the '
+            f"answer but were never returned by a tool during this investigation, so they are not backed by "
+            f"retrieved evidence:<ul>{items}</ul></div>"
         )
 
     parts.append('<h2 class="section">What the record says</h2>')

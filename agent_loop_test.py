@@ -128,7 +128,7 @@ def submit_citing_real_evidence(call: dict) -> list:
     payload = {
         "answer": f"Real evidence: [a commit]({seen}). Fabricated: [a PR]({INVENTED_URL}).",
         "timeline": [
-            {"date": "2020-02-02", "kind": "commit", "ref": seen[-7:], "title": "A real commit",
+            {"date": "2020-02-02", "kind": "commit", "ref": seen.rsplit("/", 1)[-1][:7], "title": "A real commit",
              "url": seen, "why_it_matters": "retrieved during the run"},
         ],
         "confidence": "high",
@@ -142,6 +142,39 @@ FORCED_SUBMIT = {
     "confidence": "low",
     "open_questions": ["everything"],
 }
+
+
+def make_local_repo() -> str:
+    """A throwaway repo with no remote: no URLs exist, so citations are bare shas."""
+    import subprocess
+    import tempfile
+
+    path = tempfile.mkdtemp(prefix="archaeo-local-")
+    git = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "--quiet", path], check=True)
+    for n in (1, 2):
+        Path(path, "README.md").write_text(f"version {n}\n")
+        subprocess.run([*git, "-C", path, "add", "README.md"], check=True)
+        subprocess.run([*git, "-C", path, "commit", "--quiet", "-m", f"change {n}"], check=True)
+    return path
+
+
+def last_sha_shown(call: dict) -> str:
+    import re
+
+    for message in reversed(call["messages"]):
+        if isinstance(message, dict) and isinstance(message.get("content"), list):
+            for part in message["content"]:
+                if isinstance(part, dict) and part.get("type") == "tool_result":
+                    match = re.search(r"^- ([0-9a-f]{10})", str(part.get("content", "")), re.MULTILINE)
+                    if match:
+                        return match.group(1)
+    return ""
+
+
+def submit(answer: str, timeline: list | None = None) -> list:
+    payload = {"answer": answer, "timeline": timeline or [], "confidence": "high", "open_questions": []}
+    return [Block(type="tool_use", id="s", name="submit_findings", input=payload)]
 
 
 def main(repo_path: str) -> int:
@@ -182,6 +215,9 @@ def main(repo_path: str) -> int:
         findings.unverified_urls == [INVENTED_URL],
         str(findings.unverified_urls),
     )
+    check("timeline sha ref verified alongside its url", findings.unverified_refs == [], str(findings.unverified_refs))
+    check("mixed citations give a partial verdict", findings.support == "partial", findings.support)
+    check("verdict is in the JSON record", '"support": "partial"' in result.to_json())
 
     print("\nTool results are fed back to the model")
     second_call = client.messages.calls[1]
@@ -200,6 +236,7 @@ def main(repo_path: str) -> int:
     result = run_investigation(question="?", repo_target=repo_path, on_event=lambda e: None)
     check("errored tool is marked in the trace", result.trace[0].error)
     check("run still produced findings", result.findings is not None)
+    check("an answer citing only invented sources is unsupported", result.findings.support == "unsupported")
 
     print("\nTurn exhaustion forces a final answer")
     install_fake([[Block(type="tool_use", id=f"t{i}", name="repo_overview", input={})] for i in range(10)])
@@ -207,6 +244,52 @@ def main(repo_path: str) -> int:
     check("stopped at the turn cap", len(result.trace) == 3, str(len(result.trace)))
     check("forced submit produced findings", result.findings is not None)
     check("forced answer is low confidence", result.findings and result.findings.confidence == "low")
+    check("forced answer citing nothing is flagged unsupported", result.findings and result.findings.support == "unsupported")
+
+    print("\nBare references are held to the same standard as links")
+    local = make_local_repo()
+    log_step = [Block(type="tool_use", id="t1", name="git_log_for_path", input={"path": "README.md"})]
+    shown: dict[str, str] = {}
+
+    def cite_bare(call: dict) -> list:
+        shown["sha"] = last_sha_shown(call)
+        short = shown["sha"][:7]
+        return submit(
+            f"Commit `{short}` changed it, after the discussion in #4242.",
+            [{"date": "2024-01-01", "kind": "commit", "ref": short, "title": "the change", "why_it_matters": "it"}],
+        )
+
+    install_fake([log_step, cite_bare])
+    result = run_investigation(question="?", repo_target=local, on_event=lambda e: None)
+    findings = result.findings
+    check("local repo without a GitHub remote still runs", findings is not None, result.error)
+    check("a sha a tool showed verifies with no URL", shown["sha"][:7] in findings.verified_citations, str(findings.verified_citations))
+    check("a #number no tool returned is flagged", findings.unverified_refs == ["#4242"], str(findings.unverified_refs))
+    check("one real, one invented ref is partial", findings.support == "partial", findings.support)
+
+    install_fake([log_step, lambda call: submit(f"Commit {last_sha_shown(call)[:8]} changed it.")])
+    result = run_investigation(question="?", repo_target=local, on_event=lambda e: None)
+    check("an answer citing only retrieved refs is supported", result.findings.support == "supported", result.findings.support)
+
+    install_fake(
+        [
+            [Block(type="tool_use", id="t1", name="git_show", input={"sha": "1234567abcdef1234567abcdef1234567abcdef0"})],
+            submit("Commit 1234567abc introduced it."),
+        ]
+    )
+    result = run_investigation(question="?", repo_target=local, on_event=lambda e: None)
+    check(
+        "a sha echoed back by a failed lookup is not citable",
+        result.findings.unverified_refs == ["1234567abc"] and result.findings.support == "unsupported",
+        str(result.findings.unverified_refs),
+    )
+
+    events = []
+    install_fake([submit("It is probably like this for performance reasons.")])
+    result = run_investigation(question="?", repo_target=local, on_event=events.append)
+    check("a confident answer citing nothing is flagged unsupported", result.findings.support == "unsupported")
+    check("nothing to list as unverified, yet still flagged", result.findings.unverified == [])
+    check("the unsupported verdict was reported live", any("Unsupported answer" in e.get("message", "") for e in events))
 
     print("\nA model that stalls is nudged, then given up on")
     install_fake([[Block(type="text", text="Hmm.")] for _ in range(6)])

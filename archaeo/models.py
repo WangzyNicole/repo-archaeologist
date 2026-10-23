@@ -35,6 +35,9 @@ class Findings:
 
     # Filled in by verification, not by the model.
     unverified_urls: list[str] = field(default_factory=list)
+    unverified_refs: list[str] = field(default_factory=list)   # bare "#412" / "a1b2c3d" never retrieved
+    verified_citations: list[str] = field(default_factory=list)
+    support: Literal["supported", "partial", "unsupported", ""] = ""   # "" = not checked
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,8 +45,15 @@ class Findings:
             "timeline": [event.to_dict() for event in self.timeline],
             "confidence": self.confidence,
             "open_questions": list(self.open_questions),
+            "support": self.support,
+            "verified_citations": list(self.verified_citations),
             "unverified_urls": list(self.unverified_urls),
+            "unverified_refs": list(self.unverified_refs),
         }
+
+    @property
+    def unverified(self) -> list[str]:
+        return self.unverified_urls + self.unverified_refs
 
     @classmethod
     def from_tool_input(cls, payload: dict[str, Any]) -> "Findings":
